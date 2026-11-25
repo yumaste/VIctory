@@ -91,6 +91,10 @@ fn hardware_adapter(factory: &IDXGIFactory4) -> windows::core::Result<IDXGIAdapt
     ))
 }
 
+/// The shader-visible view heap size every host takes (resource binding
+/// tiers 1 and 2), as `victory_gpu`'s host has it.
+const PORTABLE_VIEWS: u32 = 1_000_000;
+
 impl Host {
     /// The default adapter, or WARP with `warp` (or `VICTORY_WARP=1`).
     /// A software default adapter (a machine without a GPU, as CI) is
@@ -124,6 +128,23 @@ impl Host {
                     "the device supports SM {:#x} only",
                     sm.HighestShaderModel.0
                 ));
+            }
+            // A device that caps its view heaps below `HEAP_VIEWS` (NVIDIA:
+            // 1,000,000) lowers the limit translated shaders clamp to, as
+            // the runtime host does (`victory_gpu`'s `probe_view_limit`), so
+            // heaps made here and shaders translated after agree.
+            // shortcut: shaders translated before the first `Host::new`
+            // keep the limit they were made with.
+            let heap = |count: u32| {
+                device.CreateDescriptorHeap::<ID3D12DescriptorHeap>(&D3D12_DESCRIPTOR_HEAP_DESC {
+                    Type: D3D12_DESCRIPTOR_HEAP_TYPE_CBV_SRV_UAV,
+                    NumDescriptors: count,
+                    Flags: D3D12_DESCRIPTOR_HEAP_FLAG_SHADER_VISIBLE,
+                    NodeMask: 0,
+                })
+            };
+            if heap(super::HEAP_VIEWS).is_err() && heap(PORTABLE_VIEWS).is_ok() {
+                super::set_view_heap_limit(PORTABLE_VIEWS);
             }
             Ok(Host { device })
         }
