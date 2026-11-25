@@ -1030,13 +1030,13 @@ impl Deferred {
     }
 }
 
-/// Split only at a CPU read of an earlier list's GPU output. Determine
-/// every boundary before writing anything back. A potentially withheld
+/// Split when a CPU access reads or overwrites an earlier list's GPU output.
+/// Determine every boundary before writing anything back. A potentially withheld
 /// write in a later list can suppress overlapping writes even from earlier
 /// ordinary programs, so a prefix may go first only when it cannot affect
 /// that decision. The conditional tail after computed-address work is
 /// handled separately, once the GPU has actually checked those addresses.
-fn cpu_read_boundaries(runs: &[&HostList]) -> Vec<usize> {
+fn cpu_access_boundaries(runs: &[&HostList]) -> Vec<usize> {
     let mut boundaries = Vec::new();
     if runs.len() < 2 {
         return boundaries;
@@ -1069,10 +1069,12 @@ fn cpu_read_boundaries(runs: &[&HostList]) -> Vec<usize> {
         if computed {
             break;
         }
-        if deferred.copies.iter().any(|s| match s {
-            &Step::Copy(_, src, len) | &Step::Fill(_, src, len, _) => {
+        if deferred.copies.iter().any(|s| match *s {
+            Step::Copy(dst, src, len) => {
                 crate::watch::overlaps_writes((src, len), &writes)
+                    || crate::watch::overlaps_writes((dst, len), &writes)
             }
+            Step::Fill(_, src, len, _) => crate::watch::overlaps_writes((src, len), &writes),
             _ => false,
         }) && !writes.iter().any(|&(at, len)| {
             len != 0 && crate::watch::overlaps_writes(pages((at, len)), &may_withhold)
@@ -1292,7 +1294,7 @@ impl Host {
         // and the ranges shaders write are per host copy, not per submission.
         let mut submitted = self.submitted.lock().unwrap_or_else(|e| e.into_inner());
         let mut first = 0;
-        for end in cpu_read_boundaries(runs).into_iter().chain([runs.len()]) {
+        for end in cpu_access_boundaries(runs).into_iter().chain([runs.len()]) {
             self.execute_batch(&runs[first..end], &mut submitted);
             first = end;
         }
@@ -2308,15 +2310,15 @@ impl HostList {
         self.other_gpu_work.store(true, Ordering::Relaxed);
     }
 
-    /// CPU reads in the next command must follow any overlapping GPU write
-    /// recorded in this segment.
-    pub(crate) fn writes_for_cpu_reads(&self, reads: &[(usize, usize)], opaque: bool) -> bool {
-        if reads.is_empty() {
+    /// CPU accesses in the next command must follow any overlapping GPU
+    /// write recorded in this segment.
+    pub(crate) fn writes_overlap_cpu_accesses(&self, accesses: &[(usize, usize)], opaque: bool) -> bool {
+        if accesses.is_empty() {
             return false;
         }
         let deferred = self.deferred();
-        reads.iter().any(|&read| {
-            read.1 != 0 && (opaque && deferred.opaque_writes || crate::watch::overlaps_writes(read, &deferred.write_ranges))
+        accesses.iter().any(|&access| {
+            access.1 != 0 && (opaque && deferred.opaque_writes || crate::watch::overlaps_writes(access, &deferred.write_ranges))
         })
     }
 
@@ -4127,8 +4129,12 @@ mod withholding {
         let mut output = [0u8; 4];
         read.defer_fill(output.as_mut_ptr(), title as *const u8, 4);
         disjoint.defer_fill(output.as_mut_ptr(), (title + 4) as *const u8, 4);
-        assert_eq!(super::cpu_read_boundaries(&[&producer, &read]), [1]);
-        assert!(super::cpu_read_boundaries(&[&producer, &disjoint]).is_empty());
+        assert_eq!(super::cpu_access_boundaries(&[&producer, &read]), [1]);
+        assert!(super::cpu_access_boundaries(&[&producer, &disjoint]).is_empty());
+
+        let overwrite = host.new_list().unwrap();
+        overwrite.defer_copy(title as *mut u8, (title + 4) as *const u8, 4);
+        assert_eq!(super::cpu_access_boundaries(&[&producer, &overwrite]), [1]);
 
         let computed_write = |at| {
             let list = host.new_list().unwrap();
@@ -4140,21 +4146,22 @@ mod withholding {
             list
         };
         let nonoverlapping = computed_write(title + page);
-        assert_eq!(super::cpu_read_boundaries(&[&producer, &read, &nonoverlapping]), [1]);
+        assert_eq!(super::cpu_access_boundaries(&[&producer, &read, &nonoverlapping]), [1]);
         let same_page = computed_write(title + 4);
-        assert!(super::cpu_read_boundaries(&[&producer, &read, &same_page]).is_empty());
+        assert!(super::cpu_access_boundaries(&[&producer, &read, &same_page]).is_empty());
+        assert!(super::cpu_access_boundaries(&[&producer, &overwrite, &same_page]).is_empty());
         let overlapping = computed_write(title);
-        assert!(super::cpu_read_boundaries(&[&producer, &read, &overlapping]).is_empty());
-        assert!(super::cpu_read_boundaries(&[&overlapping, &read]).is_empty());
+        assert!(super::cpu_access_boundaries(&[&producer, &read, &overlapping]).is_empty());
+        assert!(super::cpu_access_boundaries(&[&overlapping, &read]).is_empty());
         let opaque = host.new_list().unwrap();
         opaque.defer_memory(0);
-        assert!(super::cpu_read_boundaries(&[&producer, &read, &opaque]).is_empty());
+        assert!(super::cpu_access_boundaries(&[&producer, &read, &opaque]).is_empty());
         assert_eq!(super::computed_tail(&[&producer, &read, &opaque]), None);
         assert_eq!(super::computed_tail(&[&producer, &opaque, &read]), Some(2));
         assert_eq!(super::computed_tail(&[&opaque, &read, &read]), Some(1));
         assert_eq!(super::computed_tail(&[&producer, &read, &nonoverlapping]), None);
         assert_eq!(super::computed_tail(&[&overlapping, &read]), Some(1));
-        drop((producer, read, disjoint, nonoverlapping, same_page, overlapping, opaque, shadow));
+        drop((producer, read, disjoint, overwrite, nonoverlapping, same_page, overlapping, opaque, shadow));
         crate::shadow::unregister(title, title as u64);
         crate::watch::tests::free(title);
     }

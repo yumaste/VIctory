@@ -2354,6 +2354,142 @@ mod tests {
         }
     }
 
+    /// A guest CopyBufferRegion must read a source write recorded before
+    /// it even when the CPU version of the source is still stale. A copy
+    /// that overwrites the GPU result must also survive its copy-back.
+    #[cfg(windows)]
+    #[test]
+    fn copy_buffer_region_orders_reads_and_overwrites_after_gpu_writes() {
+        if crate::host::host().is_none() {
+            panic!("the ordering probe requires a native D3D12 device");
+        }
+        const OLD: u32 = 0x11223344;
+        const NEW: u32 = 0x55667788;
+        const CPU: u32 = 0x99AABBCC;
+        const SENTINEL: u32 = 0xAABBCCDD;
+        let null = std::ptr::null();
+        let created = || {
+            let mut out = null;
+            assert_eq!(
+                create_committed(null, &PROPERTIES, 0, &buffer(64), 0, null.cast(), &RESOURCE_IIDS[0], &mut out),
+                S_OK
+            );
+            out
+        };
+
+        let queue_iid = guid(0x0ec870a6, 0x5d7e, 0x4c22, [0x8c, 0xfc, 0x5b, 0xaa, 0xe0, 0x76, 0x16, 0xed]);
+        let allocator_iid = guid(0x6102dee4, 0xaf59, 0x4b09, [0xb9, 0x99, 0xb4, 0x4d, 0x73, 0xf0, 0x9b, 0x24]);
+        let list_iid = guid(0x5b160d0f, 0xac1b, 0x4185, [0x8b, 0xa8, 0xb3, 0xae, 0x42, 0xa5, 0xa4, 0x55]);
+        let queue_desc = [0u32; 4];
+        let (mut queue, mut allocator) = (null, null);
+        assert_eq!(crate::queue::create(null, queue_desc.as_ptr().cast(), &queue_iid, &mut queue), S_OK);
+        assert_eq!(crate::list::create_allocator(null, 0, &allocator_iid, &mut allocator), S_OK);
+        let create_list = || {
+            let mut out = null;
+            assert_eq!(crate::list::create_list(null, 0, 0, allocator, null, &list_iid, &mut out), S_OK);
+            out
+        };
+        let submit = |lists: &[This]| {
+            for &list in lists {
+                assert_eq!(slot::<extern "system" fn(This) -> HRESULT>(list, 0x48)(list), S_OK);
+            }
+            slot::<extern "system" fn(This, u32, *const This)>(queue, 0x50)(
+                queue, lists.len() as u32, lists.as_ptr(),
+            );
+        };
+        let release = |object| assert_eq!(slot::<Release>(object, 0x10)(object), 0);
+        let host = crate::host::host().unwrap();
+
+        #[derive(Clone, Copy)]
+        enum Submission {
+            OneList,
+            OneBatch,
+            Separate,
+            DisjointRange,
+            CopyFirst,
+        }
+        use Submission::*;
+        let outcomes = [
+            (OneList, false), (OneBatch, false), (Separate, false),
+            (DisjointRange, false), (CopyFirst, false),
+            (OneList, true), (OneBatch, true), (Separate, true),
+        ].map(|(mode, overwrite)| {
+            let source = created();
+            let destination = created();
+            let (src, _) = buffer_bytes(source).unwrap();
+            let (dst, _) = buffer_bytes(destination).unwrap();
+            // SAFETY: both guest buffers are aligned and hold these words.
+            unsafe {
+                src.cast::<[u32; 3]>().write([SENTINEL, OLD, SENTINEL]);
+                let middle = if overwrite { CPU } else { SENTINEL };
+                dst.cast::<[u32; 3]>().write([SENTINEL, middle, SENTINEL]);
+            }
+            let producer = create_list();
+            let consumer = if matches!(mode, OneBatch | Separate) { create_list() } else { producer };
+            let copy = |offset| {
+                let (from, to) = if overwrite { (destination, source) } else { (source, destination) };
+                slot::<extern "system" fn(This, This, u64, This, u64, u64)>(consumer, 0x78)(
+                    consumer, to, 4, from, offset, 4,
+                );
+            };
+            if matches!(mode, CopyFirst) {
+                copy(4);
+            }
+            let commands = crate::list::host_list(producer).unwrap();
+            let address = src as u64 + 4;
+            let shadow = crate::shadow::find(address, 4).unwrap();
+            let (upload, words) = commands.upload(host, 4).unwrap();
+            shadow.refresh(commands, address, 4);
+            shadow.gpu_writes(commands, address, 4, false);
+            // SAFETY: both native buffers cover four bytes at the given
+            // offsets. The producer runs before the consumer's GPU work.
+            unsafe {
+                words.cast::<u32>().write(NEW);
+                let offset = shadow.gpu(address) - shadow.buffer.GetGPUVirtualAddress();
+                commands.list.CopyBufferRegion(&shadow.buffer, offset, &upload, 0, 4);
+            }
+            if matches!(mode, Separate) {
+                submit(&[producer]);
+            }
+            match mode {
+                CopyFirst => {}
+                DisjointRange => copy(0),
+                _ => copy(4),
+            }
+            if matches!(mode, DisjointRange | CopyFirst) {
+                assert_eq!(crate::list::segments(consumer).len(), 1);
+            }
+            match mode {
+                OneBatch => submit(&[producer, consumer]),
+                _ => submit(&[consumer]),
+            }
+            assert_eq!(shadow.read_host(address, 1), [NEW]);
+            // SAFETY: both queues have finished, and both mapped guest
+            // buffers still hold at least three words.
+            let (from, to) = unsafe {
+                (src.cast::<[u32; 3]>().read(), dst.cast::<[u32; 3]>().read())
+            };
+            assert_eq!([from[0], from[2], to[0], to[2]], [SENTINEL; 4]);
+            if overwrite {
+                assert_eq!(to[1], CPU, "the CPU copy source is unchanged");
+            } else {
+                assert_eq!(from[1], NEW, "the GPU write reached title memory");
+            }
+            release(producer);
+            if matches!(mode, OneBatch | Separate) {
+                release(consumer);
+            }
+            release(source);
+            release(destination);
+            if overwrite { from[1] } else { to[1] }
+        });
+        release(allocator);
+        release(queue);
+        println!("copy results: {outcomes:x?}");
+        assert_eq!(outcomes[..5], [NEW, NEW, NEW, SENTINEL, OLD]);
+        assert_eq!(outcomes[5..], [CPU; 3], "overwrite in one list, one batch, and separate submissions");
+    }
+
     fn heap(size: u64) -> This {
         let desc = HeapDesc {
             size,

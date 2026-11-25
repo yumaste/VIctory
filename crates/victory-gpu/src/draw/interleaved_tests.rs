@@ -247,7 +247,7 @@ fn interleaved(allow_miss: bool, marked: bool, readback_sink: bool, translated: 
         prefix.list.Dispatch(1, 1, 1);
     }
     prefix.note_buffer_dispatch(false);
-    let middle = crate::list::cpu_source_list(title_list, address, 4).unwrap();
+    let middle = crate::list::cpu_access_list(title_list, &[(address, 4)]).unwrap();
     assert!(!std::ptr::eq(prefix, middle));
     let mut state = super::State::default();
     let mut sampler = std::ptr::null();

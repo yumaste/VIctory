@@ -153,9 +153,9 @@ fn with_draw_state(this: This, compute: bool, f: impl FnOnce(&crate::host::HostL
 }
 
 #[cfg(windows)]
-pub(crate) fn cpu_source_list<'a>(this: This, from: usize, len: usize) -> Option<&'a crate::host::HostList> {
+pub(crate) fn cpu_access_list<'a>(this: This, accesses: &[(usize, usize)]) -> Option<&'a crate::host::HostList> {
     let list = host_list(this)?;
-    if !list.writes_for_cpu_reads(&[(from, len)], true) {
+    if !list.writes_overlap_cpu_accesses(accesses, true) {
         return Some(list);
     }
     // SAFETY: the title passes one of our lists.
@@ -670,7 +670,7 @@ extern "system" fn copy_buffer_region(
     if host_list(this).is_some()
         && let Some(to) = buffer_range(dst, dst_offset, len)
         && let Some(from) = buffer_range(src, src_offset, len)
-        && let Some(list) = cpu_source_list(this, from as usize, len as usize)
+        && let Some(list) = cpu_access_list(this, &[(from as usize, len as usize), (to as usize, len as usize)])
     {
         list.defer_copy(to, from, len as usize);
     }
@@ -702,9 +702,11 @@ extern "system" fn copy_resource(this: This, dst: This, src: This) {
         } else if let (Some((to, a)), Some((from, b))) = (
             crate::resource::buffer_bytes(dst),
             crate::resource::buffer_bytes(src),
-        ) && let Some(list) = cpu_source_list(this, from as usize, a.min(b) as usize)
-        {
-            list.defer_copy(to, from, a.min(b) as usize);
+        ) {
+            let len = a.min(b) as usize;
+            if let Some(list) = cpu_access_list(this, &[(from as usize, len), (to as usize, len)]) {
+                list.defer_copy(to, from, len);
+            }
         }
     }
     #[cfg(not(windows))]

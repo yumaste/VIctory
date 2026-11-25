@@ -258,7 +258,7 @@ impl State {
                 return false;
             };
             !shadow.gpu(*address).is_multiple_of(256)
-                && list.writes_for_cpu_reads(&[(*address as usize, shadow.left(*address).min(1 << 16) as usize)], opaque)
+                && list.writes_overlap_cpu_accesses(&[(*address as usize, shadow.left(*address).min(1 << 16) as usize)], opaque)
         })
     }
 
@@ -2310,7 +2310,7 @@ void main() { target.Store(0, value); }
                 }
                 &second
             } else if offset != 0 {
-                crate::list::cpu_source_list(title_list, input_address as usize, produced.left(input_address) as usize).unwrap()
+                crate::list::cpu_access_list(title_list, &[(input_address as usize, produced.left(input_address) as usize)]).unwrap()
             } else {
                 first
             };
@@ -2450,7 +2450,7 @@ void main() {
                 prefix.list.SetComputeRoot32BitConstants(3, 3, args.as_ptr().cast(), 0);
                 prefix.list.Dispatch(1, 1, 1);
             }
-            let suffix = crate::list::cpu_source_list(title_list, address, 4).unwrap();
+            let suffix = crate::list::cpu_access_list(title_list, &[(address, 4)]).unwrap();
             assert!(!std::ptr::eq(prefix, suffix), "opaque producer must end before CPU staging");
             // The innermost view can be a different copy than the full
             // page owner selected by the computed address table.
