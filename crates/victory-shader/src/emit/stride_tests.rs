@@ -309,16 +309,6 @@ fn a_heap_buffer_read_by_element_takes_the_views_stride() {
 /// indices"): a texture descriptor read as a buffer one is a wild address.
 #[test]
 fn a_heap_buffer_read_where_no_buffer_view_is_reads_zeros() {
-    let shader = build(
-        HEAP_ELEMENT_WAVE32,
-        vec![
-            param(RootType::Constants, 0),
-            param(RootType::ResourceHeap, 1),
-            param(RootType::Table, 2),
-        ],
-        vec![entry(ResourceType::Uav, 4, 2)],
-        32,
-    );
     let texel = [[1.0f32, 2.0, 3.0, 4.0]];
     let views = [View::RawUav(32), View::Texture(1, 1, &texel), View::NullBuffers];
     let _one = super::valu_tests::ONE_AT_A_TIME
@@ -330,6 +320,24 @@ fn a_heap_buffer_read_where_no_buffer_view_is_reads_zeros() {
             eprintln!("no SM 6.6 {label} device; skipped");
             continue;
         };
+        // Host::new probes the heap limit. Lowering embeds the null slot
+        // for that limit, so translate only after the probe.
+        let translated_null_slot = super::null_buffer_view();
+        let shader = build(
+            HEAP_ELEMENT_WAVE32,
+            vec![
+                param(RootType::Constants, 0),
+                param(RootType::ResourceHeap, 1),
+                param(RootType::Table, 2),
+            ],
+            vec![entry(ResourceType::Uav, 4, 2)],
+            32,
+        );
+        assert_eq!(
+            translated_null_slot,
+            super::null_buffer_view(),
+            "{label}: shader fallback descriptor must match the null SRV in the dispatch heap"
+        );
         let (root, pso) = host
             .compute_pipeline(&shader)
             .unwrap_or_else(|e| panic!("{label}: compute_pipeline failed: {e}"));
