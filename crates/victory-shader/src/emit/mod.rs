@@ -83,17 +83,19 @@
 //!   vertex shader's outputs completes each rectangle with its fourth
 //!   corner opposite the right angle ([`right_angle`]), as the console's
 //!   hardware does.
-//! * **Heap indices** (added 2026-11-24) are clamped to [`HEAP_VIEWS`] − 1
-//!   (samplers [`HEAP_SAMPLERS`] − 1): the host's heaps have at least that
-//!   many slots, those past its own null, so an index past the heap (data
-//!   still wrong; the console would read whatever memory follows its heap)
-//!   reads nothing instead of faulting the device.
+//! * **Heap indices** (added 2026-11-24) are clamped to [`view_heap_limit`]
+//!   − 1 (samplers [`HEAP_SAMPLERS`] − 1): the host's heaps have at least
+//!   that many slots, those past its own null, so an index past the heap
+//!   (data still wrong; the console would read whatever memory follows its
+//!   heap) reads nothing instead of faulting the device. The limit is
+//!   [`HEAP_VIEWS`], or the cap of a host whose view heaps are capped lower
+//!   (NVIDIA: 1,000,000), set before translating ([`set_view_heap_limit`]).
 //! * **Buffer views at computed heap indices** (added 2026-11-24): a
 //!   buffer read through a descriptor the shader takes from the resource
 //!   heap itself first looks up the view-stride table (root SRV
 //!   `t`[`VIEW_STRIDES`], which then covers every index below
-//!   [`HEAP_VIEWS`], dynamic slots too); where it holds 0 (no buffer view
-//!   there) the shader reads heap index [`NULL_BUFFER_VIEW`] instead (for
+//!   the view limit, dynamic slots too); where it holds 0 (no buffer view
+//!   there) the shader reads heap index [`null_buffer_view`] instead (for
 //!   unordered access the index below), which the host keeps a null raw
 //!   buffer SRV (UAV). The index comes from data, and a texture descriptor
 //!   read as a buffer one is a wild address (the texture's shifted 8 bits
@@ -232,9 +234,10 @@ use crate::{ShaderError, io, ir, resource, structure};
 
 pub use sampler::StaticSampler;
 pub use shader::{
-    HEAP_SAMPLERS, HEAP_VIEWS, MEMORY_SPACE, NULL_BUFFER_VIEW, ROOT_CBV_SPACE, SAMPLER_SPACE,
-    USER_DATA_SPACE, VIEW_INTEGER, VIEW_MARK_NONE, VIEW_MARKS, VIEW_READS, VIEW_SIGNED, VIEW_STRIDE_BITS,
-    VIEW_STRIDES, VIEW_WRITE_BITS, VIEW_WRITES,
+    HEAP_SAMPLERS, HEAP_VIEWS, MEMORY_SPACE, ROOT_CBV_SPACE, SAMPLER_SPACE, USER_DATA_SPACE,
+    VIEW_INTEGER, VIEW_MARK_NONE, VIEW_MARKS, VIEW_READS, VIEW_SIGNED, VIEW_STRIDE_BITS,
+    VIEW_STRIDES, VIEW_WRITE_BITS, VIEW_WRITES, null_buffer_view, set_view_heap_limit,
+    view_heap_limit,
 };
 
 /// The loop limit without an override: 2^20.
